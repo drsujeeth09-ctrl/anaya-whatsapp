@@ -52,14 +52,19 @@ export default async function handler(req, res) {
   const fee = consultationType === 'emergency' ? '2000' : '1000';
 
   // Map language → template name + lang code
+  // 2026-04-29: switched from v1 → v2 template family.  v2_te + v2_hi
+  // approved by Meta same day; v1 family still PENDING.  v2_en may still
+  // be PENDING — until it approves, en sends will fail and Anaya pivots
+  // to the drsujeeth.com website fallback (per the published Retell
+  // prompt, Step Seven).  Same 3-variable contract.
   const lang = String(args.language || 'English').toLowerCase().trim();
-  let templateName = 'clinic_booking_link_en';
+  let templateName = 'clinic_booking_link_v2_en';
   let templateLang = 'en';
   if (lang.startsWith('te')) {
-    templateName = 'clinic_booking_link_te';
+    templateName = 'clinic_booking_link_v2_te';
     templateLang = 'te';
   } else if (lang.startsWith('hi')) {
-    templateName = 'clinic_booking_link_hi';
+    templateName = 'clinic_booking_link_v2_hi';
     templateLang = 'hi';
   }
 

@@ -1,7 +1,7 @@
 {
   "name": "anaya-whatsapp",
-  "version": "1.0.0",
-  "description": "Vercel serverless function: Retell send_booking_link bridge to Meta WhatsApp Business Cloud API for Dr. Sujeeth's Clinic",
+  "version": "1.1.0",
+  "description": "Vercel serverless functions for Dr. Sujeeth's clinic: Anaya booking-link bridge + daily WhatsApp/email reminder cron + Meta delivery webhook",
   "private": true,
   "type": "module",
   "engines": {
@@ -10,5 +10,9 @@
   "scripts": {
     "dev": "vercel dev",
     "deploy": "vercel --prod"
+  },
+  "dependencies": {
+    "nodemailer": "^6.10.0",
+    "pg": "^8.13.0"
   }
 }

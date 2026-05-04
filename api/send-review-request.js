@@ -55,23 +55,33 @@ export default async function handler(req, res) {
     return res.status(400).json({ success: false, error: 'review_url required (http/https)' });
   }
 
-  const templateName = `clinic_review_request_v1_${language}`;
+  // English uses v2 (UTILITY, ~7x cheaper) with a no-variable body;
+  // Telugu and Hindi still use v1 (MARKETING) with a {{1}} greeting variable.
+  // Both template families share the same URL-button pattern:
+  //   url:  https://g.page/r/{{1}}
+  //   {{1}} = the place-ID slug + "/review" suffix only, NOT the full URL.
+  const templateName = language === 'en'
+    ? 'clinic_review_request_v2_en'
+    : `clinic_review_request_v1_${language}`;
   const META_PHONE_ID = '1041261462414391';
   const META_API_BASE = 'https://graph.facebook.com/v22.0';
 
-  // The button URL is suffixed onto the template's base URL by Meta — we
-  // pass the FULL final URL as the parameter and let Meta handle it. Most
-  // installations approve the template with a `*` wildcard suffix so any
-  // review_url passes through unmodified.
-  const components = [
-    { type: 'body', parameters: [{ type: 'text', text: patientName }] },
-    {
-      type: 'button',
-      sub_type: 'url',
-      index: '0',
-      parameters: [{ type: 'text', text: reviewUrl }],
-    },
-  ];
+  // Extract the URL suffix Meta concatenates onto the template base.
+  // Accepts either a full URL ("https://g.page/r/SLUG/review") or a bare
+  // slug ("SLUG/review") so callers don't have to think about it.
+  const buttonSuffix = reviewUrl.replace(/^https?:\/\/g\.page\/r\//i, '');
+
+  const components = [];
+  // v2_en's body has no {{1}}, so don't send a body component for it.
+  if (templateName !== 'clinic_review_request_v2_en') {
+    components.push({ type: 'body', parameters: [{ type: 'text', text: patientName }] });
+  }
+  components.push({
+    type: 'button',
+    sub_type: 'url',
+    index: '0',
+    parameters: [{ type: 'text', text: buttonSuffix }],
+  });
 
   const payload = {
     messaging_product: 'whatsapp',

@@ -5,7 +5,8 @@
     "api/send-prescription.js":      { "maxDuration": 15 },
     "api/send-receipt.js":           { "maxDuration": 15 },
     "api/run-daily-reminders.js":    { "maxDuration": 60 },
-    "api/whatsapp-webhook.js":       { "maxDuration": 10 }
+    "api/whatsapp-webhook.js":       { "maxDuration": 30 },
+    "api/inbound-webhook.js":        { "maxDuration": 15 }
   },
   "crons": [
     {

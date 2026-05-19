@@ -122,10 +122,13 @@ export default async function handler(req, res) {
         if (m.button) log.button_text = m.button.text;
         if (m.text) log.text = m.text.body && m.text.body.slice(0, 200);
         console.log('[whatsapp-webhook] inbound', JSON.stringify(log));
-        // Fire-and-forget so the webhook can respond 200 to Meta within
-        // their 10-second budget regardless of Claude/Meta latency.  Errors
-        // are still logged via wa-reply's own console.log.
-        handleInboundMessage(m, v.contacts || []).catch(e => {
+        // Await so Vercel doesn't terminate the lambda before reply +
+        // email forward complete.  Meta's webhook timeout is 20s; our
+        // handler usually completes in 2-5s (Claude + Meta send + SMTP).
+        // Previous fire-and-forget caused inbounds to log but never
+        // produce a reply (lambda died mid-flight) — same bug class as
+        // the Zoho back-fetch fix on 2026-05-04.
+        await handleInboundMessage(m, v.contacts || []).catch(e => {
           console.error('[whatsapp-webhook] handleInboundMessage failed:', e?.message);
         });
       }

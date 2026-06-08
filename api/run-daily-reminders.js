@@ -56,12 +56,23 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: 'META_WHATSAPP_TOKEN not set' });
   }
 
+  // Dry-run: compute cohorts + build the would-send payloads but DON'T call
+  // Meta/Gmail. Lets us verify the reminder pipeline without messaging patients.
+  //   POST /api/run-daily-reminders?dryRun=1   (still needs CRON_SECRET)
+  const dryRun = req.query?.dryRun === '1' || req.query?.dryRun === 'true';
+  const sendWA = dryRun
+    ? async ({ to, template }) => ({ success: true, wamid: '(dry-run)', to, template })
+    : sendMetaTemplate;
+  const sendFuEmail = dryRun ? async () => ({ messageId: '(dry-run)' }) : sendFollowUpReminderEmail;
+  const sendApptEmail = dryRun ? async () => ({ messageId: '(dry-run)' }) : sendAppointmentReminderEmail;
+
   const today = todayInIST();
   const t2 = addDaysISO(today, 2);
   const tomorrow = addDaysISO(today, 1);
 
   const summary = {
     runAt: new Date().toISOString(),
+    dryRun,
     today,
     cohorts: { followup_t2: t2, appointments_tomorrow: tomorrow },
     followups: [],
@@ -100,7 +111,7 @@ export default async function handler(req, res) {
     // WhatsApp
     if (patient.phone) {
       const phone = cleanPhone(patient.phone);
-      const wa = await sendMetaTemplate({
+      const wa = await sendWA({
         token: META_TOKEN,
         to: phone,
         template: 'followup_reminder_2d_en',
@@ -122,7 +133,7 @@ export default async function handler(req, res) {
     // Email (parallel channel — sent regardless of WhatsApp result)
     if (patient.email) {
       try {
-        const em = await sendFollowUpReminderEmail(patient, t2);
+        const em = await sendFuEmail(patient, t2);
         result.sends.email = { ok: true, messageId: em.messageId };
         summary.counts.email_ok++;
       } catch (e) {
@@ -167,7 +178,7 @@ export default async function handler(req, res) {
 
     // WhatsApp
     if (patient.phone) {
-      const wa = await sendMetaTemplate({
+      const wa = await sendWA({
         token: META_TOKEN,
         to: cleanPhone(patient.phone),
         template: 'appointment_reminder_24h_en',
@@ -190,7 +201,7 @@ export default async function handler(req, res) {
     // Email
     if (patient.email) {
       try {
-        const em = await sendAppointmentReminderEmail(patient, tomorrow, time);
+        const em = await sendApptEmail(patient, tomorrow, time);
         result.sends.email = { ok: true, messageId: em.messageId };
         summary.counts.email_ok++;
       } catch (e) {

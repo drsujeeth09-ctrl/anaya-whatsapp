@@ -1,0 +1,34 @@
+{
+  "_note": "Submitted to Meta 2026-05-04 in response to v2_hi being auto-classified MARKETING and silently filtered by WhatsApp on first-send. Reworded to lead with 'बुकिंग सूचना:' (Booking notice) and a transactional framing — no greeting, no clinic-name introduction. Goal: keep UTILITY classification on approval.",
+  "_template_id": "2023451148241641",
+  "_status_at_submission": "PENDING",
+  "_requested_category": "UTILITY",
+  "_supersedes": "clinic_booking_link_v2_hi (id 949881344344738)",
+  "name": "clinic_booking_link_v3_hi",
+  "language": "hi",
+  "category": "UTILITY",
+  "components": [
+    {
+      "type": "BODY",
+      "text": "बुकिंग सूचना: {{1}} जी, आपका {{2}} परामर्श अभी पुष्टि नहीं हुआ है।\n\nसमय चुनने और ₹{{3}} का भुगतान पूरा करने के लिए नीचे दिए गए लिंक पर जाएँ। भुगतान के बाद ही स्लॉट सुरक्षित होगा।",
+      "example": {
+        "body_text": [["प्रिया शर्मा", "रेगुलर", "1000"]]
+      }
+    },
+    {
+      "type": "FOOTER",
+      "text": "डॉ. सुजीत क्लिनिक, अपोलो क्लिनिक मणिकोंडा"
+    },
+    {
+      "type": "BUTTONS",
+      "buttons": [
+        {
+          "type": "URL",
+          "text": "बुकिंग लिंक खोलें",
+          "url": "https://drsujeethkumar.zohobookings.in/"
+        }
+      ]
+    }
+  ],
+  "_post_approval_action": "Update Documents/Voice-Scripts/anaya-whatsapp/api/send-booking-link.js: change templateName 'clinic_booking_link_v2_hi' to 'clinic_booking_link_v3_hi' on the te/hi branch."
+}

@@ -1,0 +1,212 @@
+// FUTURE: Instagram comment-trigger auto-DM handler.
+// Status: SCAFFOLD ONLY — do NOT deploy as-is.
+// Created: 2026-05-04 alongside Analytics/08_meta_ig_automations_manual_walkthrough.md
+//
+// ============================================================================
+// WHY THIS FILE EXISTS BUT ISN'T LIVE
+// ============================================================================
+// The current Meta System User token (META_WHATSAPP_TOKEN) is scoped to:
+//   - business_management
+//   - whatsapp_business_management
+//   - whatsapp_business_messaging
+//   - whatsapp_business_manage_events
+// It does NOT have Instagram scopes.  Meta gates IG scope granting behind a
+// UI-only flow (Business Manager → System Users → Add Assets → IG account →
+// Permissions → re-issue token).
+//
+// Until that's done, IG auto-DM is run via Meta Business Suite UI rules — see
+// Analytics/08_meta_ig_automations_manual_walkthrough.md.
+//
+// ============================================================================
+// ONBOARDING (the user must do this once, ~10 min, in a browser)
+// ============================================================================
+// 1. Go to https://business.facebook.com/settings/instagram-accounts
+//    Confirm @drsujeeth is listed as an Instagram asset of business 998094764566824.
+//    If not, click "Add" → "Connect your Instagram account" → log in as @drsujeeth.
+//
+// 2. Go to https://business.facebook.com/settings/system-users
+//    Click the System User that owns the WhatsApp token (named "Dr Sujeeth Kumar"
+//    per token debug response, app_id 820170837411052).
+//    → Add Assets → Instagram accounts → @drsujeeth → toggle ON:
+//        - Manage messages
+//        - Moderate comments
+//        - Read insights (optional but useful)
+//
+// 3. In the same System User screen → Generate New Token (or "Add Token")
+//    → select scopes:
+//        - instagram_business_basic
+//        - instagram_business_manage_comments
+//        - instagram_business_manage_messages
+//        - pages_show_list (Meta sometimes requires this even for IG-only flows)
+//        - + keep all whatsapp_business_* scopes (token will be reused for IG
+//          AND continue handling WABA, since they share the same Business)
+//    → Generate Token → copy.
+//
+// 4. Paste new token into Vercel as a NEW env var (do NOT overwrite the
+//    WhatsApp one until you've confirmed IG flow works):
+//        META_INSTAGRAM_TOKEN = <new long-lived token>
+//
+//    Or, if you regenerate the SAME System User token (Meta lets one token
+//    cover multiple scope sets), simply replace META_WHATSAPP_TOKEN.
+//
+// 5. Find the IG Business Account ID:
+//    curl "https://graph.facebook.com/v22.0/me/accounts?access_token=$TOKEN&fields=id,name,instagram_business_account"
+//    The `instagram_business_account.id` is what goes in IG_USER_ID below.
+//
+// 6. Configure webhook subscription for IG `comments` field:
+//    curl -X POST "https://graph.facebook.com/v22.0/$IG_USER_ID/subscribed_apps?access_token=$TOKEN" \
+//         -d "subscribed_fields=comments,messages"
+//
+//    AND in Meta App Dashboard → Webhooks → Instagram product → subscribe to
+//    `comments` field with callback URL = https://anaya-whatsapp.vercel.app/api/whatsapp-webhook
+//    (same URL as WhatsApp uses; webhook handler now branches on `object` type).
+//
+// 7. Update whatsapp-webhook.js to dispatch IG events to this file (see
+//    "Routing change required in whatsapp-webhook.js" section at end).
+//
+// 8. Rename this file: ig-comment-handler.js.todo → ig-comment-handler.js
+//
+// ============================================================================
+// SCAFFOLD CODE (untested — needs token before it can be exercised)
+// ============================================================================
+
+import crypto from 'crypto';
+
+// IG Business Account ID for @drsujeeth.  Fill in after step 5 above.
+const IG_USER_ID = process.env.IG_USER_ID || ''; // e.g. "17841401234567890"
+const META_API = 'https://graph.facebook.com/v22.0';
+
+// Keyword → DM message mapping.  Mirrors Analytics/07 Part B3 + 08.
+const RULES = [
+  {
+    name: 'BOOK',
+    keywords: ['book', 'booking', 'appointment', 'consultation'],
+    message:
+      "Hi! Thanks for reaching out 🙏 To book a consultation with Dr. Sujeeth, tap here: " +
+      "https://drsujeeth.com/?utm_source=ig&utm_medium=dm Or call 9963009090 — Anaya, our " +
+      "voice agent, will help you pick a time. — Team Dr. Sujeeth",
+  },
+  {
+    name: 'PRICE',
+    keywords: ['price', 'cost', 'fees', 'how much', 'charges'],
+    message:
+      "Hi! Surgical costs vary by procedure and insurance. Quick guides: " +
+      "👉 Hernia: https://drsujeeth.com/hernia-surgery-cost-in-hyderabad/?utm_source=ig " +
+      "👉 Laparoscopic: https://drsujeeth.com/laparoscopic-surgery-cost-hyderabad/?utm_source=ig " +
+      "For an exact quote, book a consultation: https://drsujeeth.com/?utm_source=ig&utm_medium=dm " +
+      "— Team Dr. Sujeeth",
+  },
+  {
+    name: 'VIDEO',
+    keywords: ['video', 'youtube', 'watch'],
+    message:
+      "Hi! Dr. Sujeeth's full video library is on YouTube — daily Telugu shorts + " +
+      "long-form explainers: https://www.youtube.com/@dr.sujeeth Subscribe for new content " +
+      "every evening at 7 PM IST. — Team Dr. Sujeeth",
+  },
+  {
+    name: 'INFO',
+    keywords: ['info', 'details', 'tell me more'],
+    message:
+      "Hi! Thanks for reaching out 🙏 You can find everything about Dr. Sujeeth's clinic " +
+      "— services, conditions treated, location, fees — at " +
+      "https://drsujeeth.com/?utm_source=ig&utm_medium=dm Or DM \"BOOK\" to schedule a " +
+      "consultation. — Team Dr. Sujeeth",
+  },
+];
+
+// 24h dedupe — one DM per (commenter_ig_id, rule.name) per day.
+// In-memory only; for production switch to a Redis or Vercel KV store.
+const recentSends = new Map();
+const DEDUPE_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+function shouldDedupe(igUserId, ruleName) {
+  const key = `${igUserId}:${ruleName}`;
+  const last = recentSends.get(key);
+  if (last && Date.now() - last < DEDUPE_WINDOW_MS) return true;
+  recentSends.set(key, Date.now());
+  return false;
+}
+
+function matchRule(commentText) {
+  const t = String(commentText || '').toLowerCase();
+  if (!t) return null;
+  // Order matters: more specific rules first.  PRICE before INFO so "price info" → PRICE.
+  for (const rule of RULES) {
+    if (rule.keywords.some((kw) => t.includes(kw))) return rule;
+  }
+  return null;
+}
+
+async function sendPrivateReply(commentId, message) {
+  const TOKEN = process.env.META_INSTAGRAM_TOKEN || process.env.META_WHATSAPP_TOKEN;
+  if (!TOKEN || !IG_USER_ID) {
+    console.error('[ig-handler] missing TOKEN or IG_USER_ID');
+    return { ok: false, error: 'config' };
+  }
+  const url = `${META_API}/${IG_USER_ID}/messages`;
+  const body = {
+    recipient: { comment_id: commentId },
+    message: { text: message },
+  };
+  const r = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${TOKEN}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  });
+  const data = await r.json();
+  if (data.message_id || data.recipient_id) {
+    console.log('[ig-handler] sent', { commentId, message_id: data.message_id });
+    return { ok: true, ...data };
+  }
+  console.error('[ig-handler] FAIL', JSON.stringify(data));
+  return { ok: false, error: data };
+}
+
+// Process a single IG webhook change. Meta payload shape (per Webhooks Reference):
+//   { field: 'comments', value: { from: { id, username }, media: { id, media_product_type },
+//     id: <comment_id>, text: <comment text>, parent_id?: <parent_comment_id> } }
+export async function handleIgComment(change) {
+  if (change.field !== 'comments') return;
+  const v = change.value || {};
+  const commentId = v.id;
+  const text = v.text;
+  const fromId = v.from && v.from.id;
+  if (!commentId || !text || !fromId) {
+    console.warn('[ig-handler] malformed comment payload', JSON.stringify(v).slice(0, 300));
+    return;
+  }
+  // Don't reply to our own comments.
+  if (fromId === IG_USER_ID) return;
+  const rule = matchRule(text);
+  if (!rule) {
+    console.log('[ig-handler] no match', { commentId, text: text.slice(0, 80) });
+    return;
+  }
+  if (shouldDedupe(fromId, rule.name)) {
+    console.log('[ig-handler] deduped', { fromId, rule: rule.name });
+    return;
+  }
+  await sendPrivateReply(commentId, rule.message);
+}
+
+// ============================================================================
+// ROUTING CHANGE REQUIRED IN whatsapp-webhook.js
+// ============================================================================
+// At the top of the POST handler, after parsing body, branch on body.object:
+//
+//   if (body.object === 'instagram') {
+//     const { handleIgComment } = await import('./ig-comment-handler.js');
+//     for (const entry of (body.entry || [])) {
+//       for (const change of (entry.changes || [])) {
+//         await handleIgComment(change);
+//       }
+//     }
+//     return res.status(200).json({ ok: true });
+//   }
+//   // ... existing whatsapp_business_account handling continues below
+//
+// HMAC verification stays the same — both products use META_APP_SECRET.

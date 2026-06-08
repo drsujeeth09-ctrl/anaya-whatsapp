@@ -19,6 +19,7 @@
 
 import {
   consultationsWithFollowUpOn,
+  consultationsWithFollowUpUnbooked,
   appointmentsOn,
   formatTimeIST,
 } from '../lib/db.js';
@@ -81,14 +82,46 @@ export default async function handler(req, res) {
   };
 
   // -------------------------------------------------------------------------
-  // 1. T-2 follow-up cohort
+  // 1. Follow-up cohort(s)
+  //    Normal daily run:
+  //      • T-2 first nudge  — every follow-up due in 2 days.
+  //      • T-0 day-of nudge — follow-ups due TODAY whose patient still hasn't
+  //        booked/returned (2nd-chance reminder; added 2026-06-08).
+  //    Backfill mode (?followupBackfillDays=N): one-time catch-up for
+  //      follow-ups due in [today-N, tomorrow] whose patient hasn't booked —
+  //      recovers nudges the cron missed while it was down 2026-05-27 → 06-08.
+  //      Runs ONLY the follow-up cohort (skips the appointment cohort below).
   // -------------------------------------------------------------------------
+  const fuBackfillDays = parseInt(req.query?.followupBackfillDays || '', 10) || 0;
+  if (fuBackfillDays) summary.cohorts.followupBackfillDays = fuBackfillDays;
+
   let followupRows = [];
   try {
-    followupRows = await consultationsWithFollowUpOn(t2);
+    if (fuBackfillDays > 0) {
+      followupRows = await consultationsWithFollowUpUnbooked(
+        addDaysISO(today, -fuBackfillDays),
+        addDaysISO(today, 2), // exclusive end → includes tomorrow's due date
+      );
+    } else {
+      const t2rows = await consultationsWithFollowUpOn(t2);
+      const t0rows = await consultationsWithFollowUpUnbooked(today, tomorrow);
+      followupRows = [...t2rows, ...t0rows];
+    }
   } catch (e) {
     summary.followups.push({ error: 'db_query_failed', message: e.message });
     return res.status(500).json({ ...summary, fatal: 'db error in followup query' });
+  }
+
+  // One reminder per patient — dedupe keeping the latest follow-up date.
+  {
+    const byPatient = new Map();
+    for (const r of followupRows) {
+      const ex = byPatient.get(r.patient_id);
+      if (!ex || new Date(r.follow_up_date) > new Date(ex.follow_up_date)) {
+        byPatient.set(r.patient_id, r);
+      }
+    }
+    followupRows = [...byPatient.values()];
   }
 
   for (const row of followupRows) {
@@ -100,11 +133,13 @@ export default async function handler(req, res) {
       phone: row.phone,
       email: row.email,
     };
-    const dateLong = formatDateLong(t2);
+    // Per-row follow-up date (cohorts now span multiple dates).
+    const dateISO = new Date(row.follow_up_date).toISOString().slice(0, 10);
+    const dateLong = formatDateLong(dateISO);
     const result = {
       patient_id: row.patient_id,
       first_name: row.first_name,
-      followup_date: t2,
+      followup_date: dateISO,
       sends: {},
     };
 
@@ -133,7 +168,7 @@ export default async function handler(req, res) {
     // Email (parallel channel — sent regardless of WhatsApp result)
     if (patient.email) {
       try {
-        const em = await sendFuEmail(patient, t2);
+        const em = await sendFuEmail(patient, dateISO);
         result.sends.email = { ok: true, messageId: em.messageId };
         summary.counts.email_ok++;
       } catch (e) {
@@ -148,11 +183,11 @@ export default async function handler(req, res) {
   }
 
   // -------------------------------------------------------------------------
-  // 2. 24-hour appointment cohort
+  // 2. 24-hour appointment cohort  (skipped during a follow-up backfill run)
   // -------------------------------------------------------------------------
   let apptRows = [];
   try {
-    apptRows = await appointmentsOn(tomorrow);
+    apptRows = fuBackfillDays ? [] : await appointmentsOn(tomorrow);
   } catch (e) {
     summary.appointments.push({ error: 'db_query_failed', message: e.message });
   }

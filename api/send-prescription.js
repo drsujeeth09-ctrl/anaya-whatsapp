@@ -84,21 +84,38 @@ export default async function handler(req, res) {
   const prescriptionPublicUrl = `https://emr.drsujeeth.com/api/prescriptions/public/${publicLinkId}`;
 
   // For the v2 templates we want a polished "BV Srinivas" style greeting.
-  // The EMR passes the raw patient_name (e.g. "SRINIVAS BV") so we
-  // Title-Case + reorder it here just for the WhatsApp body. Logic mirrors
-  // what notifications.js does for the email greeting.
+  // The EMR passes patient_name as either:
+  //   (a) raw "FIRSTNAME LASTNAME" (e.g. "SRINIVAS BV")  ← legacy callers
+  //   (b) "Salutation FirstName" (e.g. "Mr. Faraz")     ← current EMR via
+  //       formatGreetingName(), since the salutation prefix is preserved
+  //
+  // 2026-06-01 fix: the previous logic blindly moved the FIRST token to the
+  // END, so "Mr. Faraz" became "Faraz Mr." ("Dear Faraz Mr.,") for any
+  // patient who had a salutation set. Peel off a leading salutation BEFORE
+  // the swap and reattach it at the front afterwards.
+  const SALUTATIONS_RE = /^(mr|mrs|ms|miss|dr|baby)\.?$/i;
   const _titleCase = (s) => String(s || '').split(/\s+/).map((w) =>
     w.length <= 3 && w === w.toUpperCase() ? w : w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()
   ).join(' ');
-  const _parts = String(patientName || '').trim().split(/\s+/);
-  let greetingPatientName = patientName;
-  if (_parts.length >= 2) {
-    const first = _parts[0];
-    const rest = _parts.slice(1).join(' ');
-    greetingPatientName = `${_titleCase(rest)} ${_titleCase(first)}`.trim();
-  } else {
-    greetingPatientName = _titleCase(patientName);
+  const _rawTokens = String(patientName || '').trim().split(/\s+/).filter(Boolean);
+  let _salPrefix = '';
+  let _nameTokens = _rawTokens;
+  if (_rawTokens.length > 0 && SALUTATIONS_RE.test(_rawTokens[0])) {
+    // Preserve the doctor's exact salutation casing/punctuation ("Mr.", "Dr.").
+    _salPrefix = _rawTokens[0];
+    _nameTokens = _rawTokens.slice(1);
   }
+  let _reordered;
+  if (_nameTokens.length >= 2) {
+    const first = _nameTokens[0];
+    const rest = _nameTokens.slice(1).join(' ');
+    _reordered = `${_titleCase(rest)} ${_titleCase(first)}`.trim();
+  } else {
+    _reordered = _titleCase(_nameTokens.join(' '));
+  }
+  let greetingPatientName = _salPrefix
+    ? `${_salPrefix} ${_reordered}`.trim()
+    : (_reordered || patientName);
   // v1 templates had different copy ("Hello {{1}}, this message is from..."), we
   // keep their fallback path with the raw patientName to avoid breaking
   // already-approved phrasing.

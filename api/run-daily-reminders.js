@@ -36,6 +36,21 @@ import {
 
 const META_TOKEN = process.env.META_WHATSAPP_TOKEN;
 
+// Language routing (Patient.preferredLanguage: 'en' | 'te' | 'hi', default 'en').
+//   langOf    — the row's language (anything unexpected falls back to 'en').
+//   tplLang   — a TEMPLATE's registered language, derived from its name
+//               suffix. Sends must always pass the template's OWN language
+//               code (never the row's) so a te/hi row falling back to an _en
+//               template still matches what Meta has approved.
+//   nameParam — {{1}} body param. te/hi template bodies already carry the
+//               honorific (గారు / जी) so they get the BARE first name; only
+//               _en templates get " garu" appended (otherwise a te row would
+//               read "గారు garu" — double honorific).
+const langOf = (row) => ['te', 'hi'].includes(row.preferred_language) ? row.preferred_language : 'en';
+const tplLang = (tpl) => tpl.endsWith('_te') ? 'te' : tpl.endsWith('_hi') ? 'hi' : 'en';
+const nameParam = (firstName, lang) =>
+  lang === 'en' ? (firstName ? `${firstName} garu` : 'there') : (firstName || 'there');
+
 export default async function handler(req, res) {
   // Health check — GET without auth.
   if (req.method === 'GET') {
@@ -140,28 +155,51 @@ export default async function handler(req, res) {
     const result = {
       patient_id: row.patient_id,
       first_name: row.first_name,
+      preferred_language: row.preferred_language,
       followup_date: dateISO,
       sends: {},
     };
 
-    // WhatsApp
+    // WhatsApp — followup_reminder_2d_<lang> first, then the always-approved
+    // English template as a safety net (skipped when the row IS English).
+    // Each attempt sends the template's OWN language code + matching {{1}}
+    // name param (see tplLang/nameParam at top).
     if (patient.phone) {
       const phone = cleanPhone(patient.phone);
-      const wa = await sendWA({
-        token: META_TOKEN,
-        to: phone,
-        template: 'followup_reminder_2d_en',
-        language: 'en',
-        parameters: [
-          // Template body opens "Hello {{1}}, ..." — append the respectful
-          // "garu" honorific when we know the name (doctor's greeting rule).
-          { type: 'text', text: patient.firstName ? `${patient.firstName} garu` : 'there' },
+      const lang = langOf(row);
+      const chain = lang === 'en'
+        ? ['followup_reminder_2d_en']
+        : [`followup_reminder_2d_${lang}`, 'followup_reminder_2d_en'];
+      let wa = null;
+      let usedTemplate = null;
+      let usedParameters = null;
+      const attemptErrors = [];
+      for (const tpl of chain) {
+        usedTemplate = tpl;
+        const attemptLang = tplLang(tpl);
+        usedParameters = [
+          { type: 'text', text: nameParam(patient.firstName, attemptLang) },
           { type: 'text', text: dateLong },
-        ],
-      });
+        ];
+        wa = await sendWA({
+          token: META_TOKEN,
+          to: phone,
+          template: tpl,
+          language: attemptLang,
+          parameters: usedParameters,
+        });
+        if (wa.success) break;
+        attemptErrors.push({ template: tpl, error: wa.error });
+      }
+      if (!wa.success) wa = { ...wa, error: { attempts: attemptErrors } };
       result.sends.whatsapp = wa.success
-        ? { ok: true, wamid: wa.wamid }
-        : { ok: false, error: wa.error };
+        ? { ok: true, wamid: wa.wamid, template: usedTemplate }
+        : { ok: false, error: wa.error, template: usedTemplate };
+      if (dryRun) {
+        // Echo the selection so ?dryRun=1 proves language routing.
+        result.sends.whatsapp.language = tplLang(usedTemplate);
+        result.sends.whatsapp.parameters = usedParameters;
+      }
       summary.counts[wa.success ? 'whatsapp_ok' : 'whatsapp_fail']++;
     } else {
       result.sends.whatsapp = { ok: false, error: 'no phone on file' };
@@ -209,50 +247,58 @@ export default async function handler(req, res) {
     const result = {
       patient_id: row.patient_id,
       first_name: row.first_name,
+      preferred_language: row.preferred_language,
       date: tomorrow,
       time,
       sends: {},
     };
 
-    // WhatsApp — visit-type-aware template:
+    // WhatsApp — visit-type- AND language-aware template:
     //   TELECONSULT with a parseable https://meet.google.com/<code> link →
-    //     appointment_reminder_online_en (dynamic Join-video-call URL button);
+    //     appointment_reminder_online_<lang> (dynamic Join-video-call URL button);
     //   everything else (IN_CLINIC / FOLLOW_UP, or teleconsult without a
-    //     usable link) → appointment_reminder_inclinic_en.
-    //   Both new templates are PENDING Meta approval (submitted 2026-06-11),
-    //   so ANY send failure retries ONCE with the approved generic
-    //   appointment_reminder_24h_en using the same 3 body params.
+    //     usable link) → appointment_reminder_inclinic_<lang>.
     if (patient.phone) {
       const meetCode = parseMeetCode(row.meet_link);
       const isOnline = row.appt_type === 'TELECONSULT' && !!meetCode;
-      const parameters = [
-        // Template body opens "Hello {{1}}, ..." — append "garu" when the
-        // name is known (doctor's respectful-greeting rule).
-        { type: 'text', text: patient.firstName ? `${patient.firstName} garu` : 'there' },
-        { type: 'text', text: dateLong },
-        { type: 'text', text: time },
-      ];
-      // Template chain: try each in order until one sends. online_v2_en is
-      // a byte-identical duplicate of online_en submitted 2026-06-11 night
-      // because online_en got stuck in a slow review lane while its te/hi
-      // twins approved in minutes — whichever clears first wins, no deploy
-      // needed. The legacy 24h template is the always-approved last resort
-      // (it carries no meet-link button, so the URL param is dropped there).
+      const lang = langOf(row);
+      // Template chain: try each in order until one sends.
+      //   en rows — online_v2_en is a byte-identical duplicate of online_en
+      //     submitted 2026-06-11 night because online_en got stuck in a slow
+      //     review lane while its te/hi twins approved in minutes — whichever
+      //     clears first wins, no deploy needed.
+      //   te/hi rows — visit-type template in the patient's language, then
+      //     the approved generic 24h_<lang>, then 24h_en as last resort.
+      //   The legacy 24h templates carry no meet-link button, so the URL
+      //   param is dropped there. Each attempt sends the template's OWN
+      //   language code + matching {{1}} name param (see tplLang/nameParam
+      //   at top) so cross-language fallbacks still match Meta's registry.
       const chain = isOnline
-        ? ['appointment_reminder_online_en', 'appointment_reminder_online_v2_en', 'appointment_reminder_24h_en']
-        : ['appointment_reminder_inclinic_en', 'appointment_reminder_24h_en'];
+        ? (lang === 'en'
+            ? ['appointment_reminder_online_en', 'appointment_reminder_online_v2_en', 'appointment_reminder_24h_en']
+            : [`appointment_reminder_online_${lang}`, `appointment_reminder_24h_${lang}`, 'appointment_reminder_24h_en'])
+        : (lang === 'en'
+            ? ['appointment_reminder_inclinic_en', 'appointment_reminder_24h_en']
+            : [`appointment_reminder_inclinic_${lang}`, `appointment_reminder_24h_${lang}`, 'appointment_reminder_24h_en']);
       let wa = null;
       let usedTemplate = null;
+      let usedParameters = null;
       const attemptErrors = [];
       for (const tpl of chain) {
         usedTemplate = tpl;
+        const attemptLang = tplLang(tpl);
+        usedParameters = [
+          { type: 'text', text: nameParam(patient.firstName, attemptLang) },
+          { type: 'text', text: dateLong },
+          { type: 'text', text: time },
+        ];
         const carriesMeetButton = isOnline && tpl.startsWith('appointment_reminder_online');
         wa = await sendWA({
           token: META_TOKEN,
           to: cleanPhone(patient.phone),
           template: tpl,
-          language: 'en',
-          parameters,
+          language: attemptLang,
+          parameters: usedParameters,
           ...(carriesMeetButton ? { buttonUrlParam: meetCode } : {}),
         });
         if (wa.success) break;
@@ -264,7 +310,8 @@ export default async function handler(req, res) {
         : { ok: false, error: wa.error, template: usedTemplate };
       if (dryRun) {
         // Echo the selection so ?dryRun=1 verifies routing without sending.
-        result.sends.whatsapp.parameters = parameters;
+        result.sends.whatsapp.language = tplLang(usedTemplate);
+        result.sends.whatsapp.parameters = usedParameters;
         if (isOnline) result.sends.whatsapp.buttonUrlParam = meetCode;
       }
       summary.counts[wa.success ? 'whatsapp_ok' : 'whatsapp_fail']++;

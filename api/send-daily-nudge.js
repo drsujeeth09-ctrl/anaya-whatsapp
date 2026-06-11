@@ -14,14 +14,16 @@
 //         POST ?date=2026-06-12     -> run a specific day (still needs auth)
 //         POST ?to=9198...          -> override recipients (comma-separated)
 //
-// Sends template `gut_daily_nudge` (en, UTILITY):
-//   {{1}} hook line · {{2}} reel shortcode · {{3}} day number
-// Falls back to a free-form text (24h session window) if the template fails.
-// No DB idempotency: a duplicate nudge to staff is harmless; manual re-POST
-// is a deliberate "send it again".
+// Sends template `gut_daily_nudge` ({{1}} hook · {{2}} reel shortcode ·
+// {{3}} day number) to NUDGE_RECIPIENTS, falling back to free-form text
+// inside 24h session windows. ALSO emails the same forward-ready message to
+// NUDGE_EMAILS via Gmail (lib/email.js) — the guaranteed channel that needs
+// no Meta template approval. No DB idempotency: a duplicate nudge to staff
+// is harmless; manual re-POST is a deliberate "send it again".
 
 import { readFileSync } from 'node:fs';
 import { sendMetaTemplate, sendMetaText } from '../lib/meta.js';
+import { sendEmail } from '../lib/email.js';
 
 const GRAPH = 'https://graph.facebook.com/v22.0';
 const TEMPLATE = 'gut_daily_nudge';
@@ -96,11 +98,13 @@ export default async function handler(req, res) {
   const today = req.query?.date || todayIST();
   const recipients = String(req.query?.to || process.env.NUDGE_RECIPIENTS || '')
     .split(',').map((s) => s.trim()).filter(Boolean);
+  const emails = String(req.query?.email || process.env.NUDGE_EMAILS || '')
+    .split(',').map((s) => s.trim()).filter(Boolean);
 
-  const summary = { runAt: new Date().toISOString(), today, dryRun, recipients: recipients.length };
+  const summary = { runAt: new Date().toISOString(), today, dryRun, recipients: recipients.length, emails: emails.length };
 
-  if (!recipients.length) {
-    return res.status(500).json({ ...summary, error: 'NUDGE_RECIPIENTS not set' });
+  if (!recipients.length && !emails.length) {
+    return res.status(500).json({ ...summary, error: 'neither NUDGE_RECIPIENTS nor NUDGE_EMAILS is set' });
   }
 
   let entry;
@@ -137,7 +141,11 @@ export default async function handler(req, res) {
   summary.reel = { permalink: reel.permalink, shortcode };
 
   if (dryRun) {
-    return res.status(200).json({ ...summary, wouldSend: composeText({ hook, shortcode, dayNum }) });
+    return res.status(200).json({
+      ...summary,
+      wouldSend: composeText({ hook, shortcode, dayNum }),
+      wouldEmail: emails,
+    });
   }
 
   const token = (process.env.META_WHATSAPP_TOKEN || '').trim();
@@ -161,6 +169,32 @@ export default async function handler(req, res) {
     results.push({ to, via, success: r.success, wamid: r.wamid, error: r.success ? undefined : r.error });
   }
 
-  const allOk = results.every((x) => x.success);
-  return res.status(allOk ? 200 : 500).json({ ...summary, sent: allOk, results });
+  // Email channel — guaranteed delivery, independent of Meta template approval.
+  const emailResults = [];
+  if (emails.length) {
+    const text = composeText({ hook, shortcode, dayNum });
+    const reelUrl = `https://www.instagram.com/reel/${shortcode}/`;
+    const html =
+      `<p>🌿 <b>Day ${dayNum} of 42 is live on Instagram.</b></p>` +
+      `<p>📺 <a href="${reelUrl}">${reelUrl}</a></p>` +
+      `<p>Forward-ready WhatsApp message (copy everything in the box):</p>` +
+      `<pre style="background:#f4f9f4;border:1px solid #cde5cd;border-radius:8px;padding:14px;white-space:pre-wrap;font-family:inherit">${text
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;')}</pre>` +
+      `<p style="color:#888;font-size:12px">Sent automatically at 6:15 AM IST after Publer posts the day's Reel. — Anaya</p>`;
+    for (const to of emails) {
+      try {
+        await sendEmail({ to, subject: `🌿 Day ${dayNum} of 42 is live — forward to the group`, html, text });
+        emailResults.push({ to, success: true });
+      } catch (e) {
+        emailResults.push({ to, success: false, error: e.message });
+      }
+    }
+  }
+
+  const waOk = !recipients.length || results.every((x) => x.success);
+  const mailOk = !emails.length || emailResults.every((x) => x.success);
+  // 200 if at least one channel fully delivered — the nudge reached a human.
+  return res.status(waOk || mailOk ? 200 : 500).json({
+    ...summary, sent: waOk || mailOk, whatsappOk: waOk, emailOk: mailOk, results, emailResults,
+  });
 }

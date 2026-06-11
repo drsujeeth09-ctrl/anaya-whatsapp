@@ -62,7 +62,8 @@ export default async function handler(req, res) {
   //   POST /api/run-daily-reminders?dryRun=1   (still needs CRON_SECRET)
   const dryRun = req.query?.dryRun === '1' || req.query?.dryRun === 'true';
   const sendWA = dryRun
-    ? async ({ to, template }) => ({ success: true, wamid: '(dry-run)', to, template })
+    ? async ({ to, template, parameters, buttonUrlParam }) =>
+        ({ success: true, wamid: '(dry-run)', to, template, parameters, buttonUrlParam })
     : sendMetaTemplate;
   const sendFuEmail = dryRun ? async () => ({ messageId: '(dry-run)' }) : sendFollowUpReminderEmail;
   const sendApptEmail = dryRun ? async () => ({ messageId: '(dry-run)' }) : sendAppointmentReminderEmail;
@@ -213,24 +214,55 @@ export default async function handler(req, res) {
       sends: {},
     };
 
-    // WhatsApp
+    // WhatsApp — visit-type-aware template:
+    //   TELECONSULT with a parseable https://meet.google.com/<code> link →
+    //     appointment_reminder_online_en (dynamic Join-video-call URL button);
+    //   everything else (IN_CLINIC / FOLLOW_UP, or teleconsult without a
+    //     usable link) → appointment_reminder_inclinic_en.
+    //   Both new templates are PENDING Meta approval (submitted 2026-06-11),
+    //   so ANY send failure retries ONCE with the approved generic
+    //   appointment_reminder_24h_en using the same 3 body params.
     if (patient.phone) {
-      const wa = await sendWA({
+      const meetCode = parseMeetCode(row.meet_link);
+      const isOnline = row.appt_type === 'TELECONSULT' && !!meetCode;
+      const parameters = [
+        // Template body opens "Hello {{1}}, ..." — append "garu" when the
+        // name is known (doctor's respectful-greeting rule).
+        { type: 'text', text: patient.firstName ? `${patient.firstName} garu` : 'there' },
+        { type: 'text', text: dateLong },
+        { type: 'text', text: time },
+      ];
+      let usedTemplate = isOnline
+        ? 'appointment_reminder_online_en'
+        : 'appointment_reminder_inclinic_en';
+      let wa = await sendWA({
         token: META_TOKEN,
         to: cleanPhone(patient.phone),
-        template: 'appointment_reminder_24h_en',
+        template: usedTemplate,
         language: 'en',
-        parameters: [
-          // Template body opens "Hello {{1}}, ..." — append "garu" when the
-          // name is known (doctor's respectful-greeting rule).
-          { type: 'text', text: patient.firstName ? `${patient.firstName} garu` : 'there' },
-          { type: 'text', text: dateLong },
-          { type: 'text', text: time },
-        ],
+        parameters,
+        ...(isOnline ? { buttonUrlParam: meetCode } : {}),
       });
+      if (!wa.success) {
+        const primaryError = { template: usedTemplate, error: wa.error };
+        usedTemplate = 'appointment_reminder_24h_en';
+        wa = await sendWA({
+          token: META_TOKEN,
+          to: cleanPhone(patient.phone),
+          template: usedTemplate,
+          language: 'en',
+          parameters,
+        });
+        if (!wa.success) wa = { ...wa, error: { fallback: wa.error, primary: primaryError } };
+      }
       result.sends.whatsapp = wa.success
-        ? { ok: true, wamid: wa.wamid }
-        : { ok: false, error: wa.error };
+        ? { ok: true, wamid: wa.wamid, template: usedTemplate }
+        : { ok: false, error: wa.error, template: usedTemplate };
+      if (dryRun) {
+        // Echo the selection so ?dryRun=1 verifies routing without sending.
+        result.sends.whatsapp.parameters = parameters;
+        if (isOnline) result.sends.whatsapp.buttonUrlParam = meetCode;
+      }
       summary.counts[wa.success ? 'whatsapp_ok' : 'whatsapp_fail']++;
     } else {
       result.sends.whatsapp = { ok: false, error: 'no phone on file' };
@@ -240,7 +272,10 @@ export default async function handler(req, res) {
     // Email
     if (patient.email) {
       try {
-        const em = await sendApptEmail(patient, tomorrow, time);
+        const em = await sendApptEmail(patient, tomorrow, time, {
+          appointmentType: row.appt_type,
+          meetLink: row.meet_link,
+        });
         result.sends.email = { ok: true, messageId: em.messageId };
         summary.counts.email_ok++;
       } catch (e) {
@@ -255,4 +290,13 @@ export default async function handler(req, res) {
   }
 
   return res.status(200).json(summary);
+}
+
+// Extract the Meet code from a https://meet.google.com/<code> link — the
+// online template's URL button only takes the dynamic suffix after the
+// domain. Returns null when the link is missing or not a parseable Meet URL
+// (caller then falls back to the in-clinic template).
+function parseMeetCode(meetLink) {
+  const m = /^https:\/\/meet\.google\.com\/([A-Za-z0-9-]+)\/?$/.exec(String(meetLink || '').trim());
+  return m ? m[1] : null;
 }

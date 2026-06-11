@@ -1,4 +1,4 @@
-// Daily Instagram Reel publisher — fires at 06:00 IST (00:30 UTC) via Vercel cron.
+// Daily Instagram Reel publisher — fires at 07:00 IST (01:30 UTC) via Vercel cron.
 //
 // Looks up today's entry (IST) in data/gut-challenge-schedule.json and publishes
 // that Reel to @drsujeeth. Idempotent: claims today's date in ig_publish_log
@@ -9,7 +9,7 @@
 // Test:   POST ?dryRun=1            -> matches today, shows what WOULD publish
 //         POST ?date=2026-06-09     -> run a specific day manually (still needs auth)
 //
-// Schedule: vercel.json -> "schedule": "30 0 * * *"  (00:30 UTC = 06:00 IST)
+// Schedule: vercel.json -> "schedule": "30 1 * * *"  (01:30 UTC = 07:00 IST)
 // See GUT-CHALLENGE-IG-SETUP.md for activation (token scopes, IG_USER_ID, hosting).
 
 import { readFileSync } from 'node:fs';
@@ -30,7 +30,7 @@ export default async function handler(req, res) {
     return res.status(200).json({
       ok: true,
       service: 'ig-daily-reel',
-      schedule: '30 0 * * * UTC (06:00 IST daily)',
+      schedule: '30 1 * * * UTC (07:00 IST daily)',
       tip: 'POST with Authorization: Bearer $CRON_SECRET. Add ?dryRun=1 to preview, ?date=YYYY-MM-DD to run one day.',
     });
   }

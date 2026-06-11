@@ -232,29 +232,33 @@ export default async function handler(req, res) {
         { type: 'text', text: dateLong },
         { type: 'text', text: time },
       ];
-      let usedTemplate = isOnline
-        ? 'appointment_reminder_online_en'
-        : 'appointment_reminder_inclinic_en';
-      let wa = await sendWA({
-        token: META_TOKEN,
-        to: cleanPhone(patient.phone),
-        template: usedTemplate,
-        language: 'en',
-        parameters,
-        ...(isOnline ? { buttonUrlParam: meetCode } : {}),
-      });
-      if (!wa.success) {
-        const primaryError = { template: usedTemplate, error: wa.error };
-        usedTemplate = 'appointment_reminder_24h_en';
+      // Template chain: try each in order until one sends. online_v2_en is
+      // a byte-identical duplicate of online_en submitted 2026-06-11 night
+      // because online_en got stuck in a slow review lane while its te/hi
+      // twins approved in minutes — whichever clears first wins, no deploy
+      // needed. The legacy 24h template is the always-approved last resort
+      // (it carries no meet-link button, so the URL param is dropped there).
+      const chain = isOnline
+        ? ['appointment_reminder_online_en', 'appointment_reminder_online_v2_en', 'appointment_reminder_24h_en']
+        : ['appointment_reminder_inclinic_en', 'appointment_reminder_24h_en'];
+      let wa = null;
+      let usedTemplate = null;
+      const attemptErrors = [];
+      for (const tpl of chain) {
+        usedTemplate = tpl;
+        const carriesMeetButton = isOnline && tpl.startsWith('appointment_reminder_online');
         wa = await sendWA({
           token: META_TOKEN,
           to: cleanPhone(patient.phone),
-          template: usedTemplate,
+          template: tpl,
           language: 'en',
           parameters,
+          ...(carriesMeetButton ? { buttonUrlParam: meetCode } : {}),
         });
-        if (!wa.success) wa = { ...wa, error: { fallback: wa.error, primary: primaryError } };
+        if (wa.success) break;
+        attemptErrors.push({ template: tpl, error: wa.error });
       }
+      if (!wa.success) wa = { ...wa, error: { attempts: attemptErrors } };
       result.sends.whatsapp = wa.success
         ? { ok: true, wamid: wa.wamid, template: usedTemplate }
         : { ok: false, error: wa.error, template: usedTemplate };

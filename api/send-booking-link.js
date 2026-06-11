@@ -120,6 +120,15 @@ export default async function handler(req, res) {
     templateLang = 'hi';
   }
 
+  // Respectful address ({{1}}): the te template body already carries the
+  // honorific ("నమస్కారం {{1}} గారు") and v3_hi carries "{{1}} जी" — appending
+  // "garu" there would double it. Only the English body ("Hello {{1}}, ...")
+  // gets " garu", and only when Retell gave us a real name (not the
+  // 'Patient' default).
+  const greetingName = (templateLang === 'en' && args.name && patientName !== 'Patient')
+    ? `${patientName} garu`
+    : patientName;
+
   const metaPayload = {
     messaging_product: 'whatsapp',
     to: patientPhone,
@@ -131,7 +140,7 @@ export default async function handler(req, res) {
         {
           type: 'body',
           parameters: [
-            { type: 'text', text: patientName },
+            { type: 'text', text: greetingName },
             { type: 'text', text: consultationType },
             { type: 'text', text: fee }
           ]

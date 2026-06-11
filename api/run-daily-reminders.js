@@ -152,7 +152,9 @@ export default async function handler(req, res) {
         template: 'followup_reminder_2d_en',
         language: 'en',
         parameters: [
-          { type: 'text', text: patient.firstName || 'there' },
+          // Template body opens "Hello {{1}}, ..." — append the respectful
+          // "garu" honorific when we know the name (doctor's greeting rule).
+          { type: 'text', text: patient.firstName ? `${patient.firstName} garu` : 'there' },
           { type: 'text', text: dateLong },
         ],
       });
@@ -219,7 +221,9 @@ export default async function handler(req, res) {
         template: 'appointment_reminder_24h_en',
         language: 'en',
         parameters: [
-          { type: 'text', text: patient.firstName || 'there' },
+          // Template body opens "Hello {{1}}, ..." — append "garu" when the
+          // name is known (doctor's respectful-greeting rule).
+          { type: 'text', text: patient.firstName ? `${patient.firstName} garu` : 'there' },
           { type: 'text', text: dateLong },
           { type: 'text', text: time },
         ],

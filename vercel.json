@@ -5,15 +5,25 @@
     "api/send-prescription.js":      { "maxDuration": 15 },
     "api/send-receipt.js":           { "maxDuration": 15 },
     "api/run-daily-reminders.js":    { "maxDuration": 60 },
+    "api/monitor-call.js":           { "maxDuration": 60 },
     "api/whatsapp-webhook.js":       { "maxDuration": 30 },
     "api/inbound-webhook.js":        { "maxDuration": 15 },
     "api/publish-daily-reel.js":     { "maxDuration": 300, "includeFiles": "data/**" },
-    "api/publish-ig-reel.js":        { "maxDuration": 300 }
+    "api/publish-ig-reel.js":        { "maxDuration": 300 },
+    "api/send-daily-nudge.js":       { "maxDuration": 60, "includeFiles": "data/**" }
   },
   "crons": [
     {
       "path": "/api/run-daily-reminders",
       "schedule": "30 3 * * *"
+    },
+    {
+      "path": "/api/monitor-call",
+      "schedule": "30 2 * * *"
+    },
+    {
+      "path": "/api/send-daily-nudge",
+      "schedule": "45 0 * * *"
     }
   ]
 }

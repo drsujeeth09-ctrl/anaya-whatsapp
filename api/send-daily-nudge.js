@@ -122,17 +122,39 @@ export default async function handler(req, res) {
   summary.ep = entry.ep;
   summary.day = entry.day;
 
-  let reel;
-  try {
-    reel = await findTodaysReel(today, hook);
-  } catch (e) {
-    return res.status(500).json({ ...summary, error: `Graph lookup failed: ${e.message}` });
+  // Poll for today's Reel for up to ~4 min — Publer posts at 06:00 sharp but
+  // the cron can fire as early as 06:30; IG processing can also lag a little.
+  let reel = null;
+  const pollMax = dryRun ? 1 : 8; // 8 tries x 30s = ~3.5 min (maxDuration 300)
+  for (let i = 0; i < pollMax; i++) {
+    try {
+      reel = await findTodaysReel(today, hook);
+    } catch (e) {
+      return res.status(500).json({ ...summary, error: `Graph lookup failed: ${e.message}` });
+    }
+    if (reel) break;
+    if (i < pollMax - 1) await new Promise((r) => setTimeout(r, 30_000));
   }
   if (!reel) {
-    return res.status(200).json({
-      ...summary, sent: false,
-      note: 'no Reel found on @drsujeeth for today yet (Publer may not have posted) — re-POST later to retry',
-    });
+    // Loud failure: alert the humans instead of skipping silently.
+    const alert = [];
+    for (const to of emails) {
+      try {
+        await sendEmail({
+          to,
+          subject: `⚠️ ${entry.day} reel NOT found on Instagram — check Publer`,
+          text:
+            `The daily nudge ran but could not find today's (${today}) Reel on @drsujeeth ` +
+            `after ~4 minutes of polling.\n\nCheck Publer (app.publer.com → Posts → Failed) ` +
+            `and Instagram. Once the Reel is up, re-trigger the nudge:\n` +
+            `POST https://anaya-whatsapp.vercel.app/api/send-daily-nudge (Bearer CRON_SECRET)`,
+        });
+        alert.push({ to, success: true });
+      } catch (e) {
+        alert.push({ to, success: false, error: e.message });
+      }
+    }
+    return res.status(200).json({ ...summary, sent: false, alerted: alert, note: 'no Reel found — alert email sent' });
   }
   const shortcode = shortcodeFrom(reel.permalink);
   if (!shortcode) {

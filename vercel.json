@@ -10,7 +10,7 @@
     "api/inbound-webhook.js":        { "maxDuration": 15 },
     "api/publish-daily-reel.js":     { "maxDuration": 300, "includeFiles": "data/**" },
     "api/publish-ig-reel.js":        { "maxDuration": 300 },
-    "api/send-daily-nudge.js":       { "maxDuration": 60, "includeFiles": "data/**" }
+    "api/send-daily-nudge.js":       { "maxDuration": 300, "includeFiles": "data/**" }
   },
   "crons": [
     {
@@ -23,7 +23,7 @@
     },
     {
       "path": "/api/send-daily-nudge",
-      "schedule": "45 0 * * *"
+      "schedule": "0 1 * * *"
     }
   ]
 }

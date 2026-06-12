@@ -204,5 +204,9 @@ function normalizeIndianMobile(raw) {
   if (digits.length === 12 && digits.startsWith('91') && /^[6-9]/.test(digits[2])) return digits;
   if (digits.length === 10 && /^[6-9]/.test(digits)) return '91' + digits;
   if (digits.length === 11 && digits.startsWith('1') && /^[6-9]/.test(digits[1])) return '91' + digits.slice(1);
+  // Trunk-prefix dictation: "0" + 10-digit mobile (e.g. 09866134340). Only the
+  // leading-0 shape is safe to strip — any other 11-digit string stays null
+  // because there is no way to know which digit is spurious.
+  if (digits.length === 11 && digits.startsWith('0') && /^[6-9]/.test(digits[1])) return '91' + digits.slice(1);
   return null;
 }

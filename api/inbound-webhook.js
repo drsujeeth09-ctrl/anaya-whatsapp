@@ -84,6 +84,7 @@ export default async function handler(req, res) {
 //   "9876543210"     -> "919876543210"   (raw 10-digit, India mobile)
 //   "+19876543210"   -> "919876543210"   (Retell wrong-country guess)
 //   "19876543210"    -> "919876543210"
+//   "09876543210"    -> "919876543210"   (trunk-prefix dictation)
 //   "anonymous"/""   -> null
 function normalizeIndianMobile(raw) {
   const digits = String(raw || '').replace(/[^0-9]/g, '');
@@ -96,6 +97,12 @@ function normalizeIndianMobile(raw) {
     return '91' + digits;
   }
   if (digits.length === 11 && digits.startsWith('1') && /^[6-9]/.test(digits[1])) {
+    return '91' + digits.slice(1);
+  }
+  // Trunk-prefix dictation: "0" + 10-digit mobile (e.g. 09866134340). Only the
+  // leading-0 shape is safe to strip — any other 11-digit string stays null
+  // because there is no way to know which digit is spurious.
+  if (digits.length === 11 && digits.startsWith('0') && /^[6-9]/.test(digits[1])) {
     return '91' + digits.slice(1);
   }
   return null;

@@ -1,0 +1,28 @@
+name: Daily Gut-Challenge Nudge
+
+# Triggers the forward-ready WhatsApp + email nudge for the day's Reel.
+# Lives here (not as a Vercel cron) because Vercel Hobby caps a project at
+# 2 cron jobs — this project already uses both (run-daily-reminders +
+# monitor-call), so the 3rd (nudge) was being silently dropped and never
+# fired. GitHub Actions has no such cap.
+#
+# 01:07 UTC = 06:37 IST. The :07 (not :00) dodges GitHub's top-of-hour
+# scheduling congestion. The endpoint itself polls ~4 min for the Reel
+# (Publer posts at 06:00), so a few minutes of GH-Actions drift is harmless.
+
+on:
+  schedule:
+    - cron: '7 1 * * *'
+  workflow_dispatch: {}   # allow manual runs from the Actions tab
+
+jobs:
+  nudge:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger send-daily-nudge
+        run: |
+          curl -fsS --retry 3 --retry-delay 20 --max-time 300 \
+            -X POST \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            "https://anaya-whatsapp.vercel.app/api/send-daily-nudge" \
+            -w '\nHTTP %{http_code}\n'

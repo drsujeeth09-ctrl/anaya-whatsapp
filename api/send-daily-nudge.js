@@ -84,7 +84,7 @@ export default async function handler(req, res) {
     return res.status(200).json({
       ok: true,
       service: 'gut-daily-nudge',
-      schedule: '45 0 * * * UTC (06:15 IST daily, Hobby drift to ~07:15)',
+      schedule: '0 1 * * * UTC (06:30 IST daily; polls ~4min for the Reel, alert-email on miss)',
       tip: 'POST with Authorization: Bearer $CRON_SECRET. ?dryRun=1 to preview, ?date=YYYY-MM-DD for a specific day, ?to=91... to override recipients.',
     });
   }

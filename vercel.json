@@ -16,10 +16,6 @@
     {
       "path": "/api/run-daily-reminders",
       "schedule": "30 3 * * *"
-    },
-    {
-      "path": "/api/monitor-call",
-      "schedule": "30 2 * * *"
     }
   ]
 }

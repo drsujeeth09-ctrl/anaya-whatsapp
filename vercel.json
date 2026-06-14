@@ -16,6 +16,10 @@
     {
       "path": "/api/run-daily-reminders",
       "schedule": "30 3 * * *"
+    },
+    {
+      "path": "/api/send-daily-nudge",
+      "schedule": "0 1 * * *"
     }
   ]
 }

@@ -46,8 +46,8 @@ Copy the `instagram_business_account.id` (17 digits) → that's `IG_USER_ID`.
 The API fetches each video by URL (no size limit, no picker — this is why it beats the browser).
 - Rename + stage clean copies:
   ```powershell
-  $src="C:\Users\drsuj\Claude\Social Media\Gut Health\42-Day-Source-Clips"
-  $dst="C:\Users\drsuj\Claude\Social Media\Gut Health\gut-challenge-hosted"
+  $src="C:\Users\drsuj\Claude\05_Social-Media\Social Media\Gut Health\42-Day-Source-Clips"
+  $dst="C:\Users\drsuj\Claude\05_Social-Media\Social Media\Gut Health\gut-challenge-hosted"
   New-Item -ItemType Directory -Force $dst | Out-Null
   Get-ChildItem "$src\*.mp4" | ? { $_.Name -match '^(EP\d{2})' -and $Matches[1] -ne 'EP28' } |
     % { Copy-Item $_.FullName (Join-Path $dst ($_.Name.Substring(0,4)+'.mp4')) -Force }

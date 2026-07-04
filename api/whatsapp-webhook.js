@@ -25,6 +25,7 @@
 
 import crypto from 'crypto';
 import { handleInboundMessage } from '../lib/wa-reply.js';
+import { updateReminderStatusByWamid } from '../lib/db.js';
 
 export const config = {
   api: {
@@ -108,6 +109,17 @@ export default async function handler(req, res) {
         if (s.conversation) log.conversation = s.conversation;
         if (s.pricing) log.pricing = s.pricing;
         console.log('[whatsapp-webhook]', JSON.stringify(log));
+        // Persist the delivery status onto the matching reminder_logs row
+        // (keyed by wamid). Best-effort: most wamids won't be ours (inbound
+        // replies, prescription/receipt sends) and update 0 rows — harmless.
+        try {
+          const errMsg = (s.errors && s.errors.length)
+            ? s.errors.map((e) => `${e.code || ''} ${e.title || ''}`.trim()).join('; ')
+            : null;
+          await updateReminderStatusByWamid(s.id, s.status, errMsg);
+        } catch (e) {
+          console.error('[whatsapp-webhook] reminderlog update failed:', e?.message);
+        }
       }
       // Inbound messages (patient replied with text, button, voice, etc.)
       // Pattern-match → Claude → send reply via Meta + forward to email.

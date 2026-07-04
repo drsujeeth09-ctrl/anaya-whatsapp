@@ -22,16 +22,19 @@ import {
   consultationsWithFollowUpUnbooked,
   appointmentsOn,
   formatTimeIST,
+  insertReminderLog,
+  reminderStats,
 } from '../lib/db.js';
 import {
   todayInIST,
   addDaysISO,
   formatDateLong,
 } from '../lib/india-holidays.js';
-import { sendMetaTemplate, cleanPhone } from '../lib/meta.js';
+import { sendMetaTemplate, cleanPhone, normalizeIndianWa } from '../lib/meta.js';
 import {
   sendFollowUpReminderEmail,
   sendAppointmentReminderEmail,
+  sendReminderDigestEmail,
 } from '../lib/email.js';
 
 const META_TOKEN = process.env.META_WHATSAPP_TOKEN;
@@ -52,20 +55,88 @@ const nameParam = (firstName, lang) =>
   lang === 'en' ? (firstName ? `${firstName} garu` : 'there') : (firstName || 'there');
 
 export default async function handler(req, res) {
-  // Health check — GET without auth.
-  if (req.method === 'GET') {
+  const wantsStats = req.query?.stats === '1' || req.query?.stats === 'true';
+  const auth = req.headers['authorization'] || req.headers['Authorization'];
+  const authed = auth === `Bearer ${process.env.CRON_SECRET}`;
+
+  // Health check — an UNAUTHENTICATED GET with no stats param (a browser / probe).
+  // ⚠ CRITICAL: Vercel Cron triggers this endpoint with an HTTP **GET** request
+  // that carries the CRON_SECRET as a Bearer token (per Vercel docs + the
+  // `vercel-cron/1.0` user agent). So an *authenticated* GET MUST fall through
+  // to the real run below — if we returned the banner for every GET (the old
+  // bug), the daily cron just echoed this banner and sent nothing, which is why
+  // reminders never went out on schedule.
+  if (req.method === 'GET' && !wantsStats && !authed) {
     return res.status(200).json({
       ok: true,
       service: 'anaya-daily-reminders',
-      tip: 'POST with Authorization: Bearer $CRON_SECRET, or let Vercel cron call it on schedule',
+      tip: 'POST or authenticated GET with Authorization: Bearer $CRON_SECRET to run; add ?stats=1&days=30 for delivery+conversion stats',
       schedule: '30 3 * * * UTC (09:00 IST daily)',
     });
   }
 
-  // Auth gate
-  const auth = req.headers['authorization'] || req.headers['Authorization'];
-  if (auth !== `Bearer ${process.env.CRON_SECRET}`) {
+  // Auth gate (covers the authenticated GET from Vercel Cron AND manual POSTs)
+  if (!authed) {
     return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  // Stats reader — delivery funnel + booking conversion from reminder_logs.
+  //   GET|POST /api/run-daily-reminders?stats=1&days=30   (needs CRON_SECRET)
+  // Returns without running the cron (and without needing META_TOKEN).
+  if (wantsStats) {
+    const days = Math.min(365, Math.max(1, parseInt(req.query?.days || '30', 10) || 30));
+    try {
+      return res.status(200).json(await reminderStats(days));
+    } catch (e) {
+      return res.status(500).json({ error: e.message });
+    }
+  }
+
+  // Force-send the weekly digest email NOW (verification / on-demand), without
+  // running the cron or messaging any patient:
+  //   POST /api/run-daily-reminders?digest=test   (needs CRON_SECRET)
+  if (req.query?.digest === 'test') {
+    try {
+      const [stats7, stats30] = await Promise.all([reminderStats(7), reminderStats(30)]);
+      const to = process.env.REMINDER_DIGEST_TO || 'drsujeeth@drsujeeth.com';
+      // ?digest=test&demo=1 injects a sample run + one sample failed patient so
+      // the full daily format (heartbeat + "couldn't reach" block) can be
+      // previewed without waiting for a real send/failure.
+      const demo = req.query?.demo === '1';
+      const alertDemo = req.query?.alert === '1'; // demo the zero-reach alert
+      const opts = alertDemo
+        ? {
+            todayRun: { followups: 2, appointments: 0, whatsapp_ok: 0, whatsapp_fail: 2, email_ok: 0, email_fail: 0 },
+            runDate: todayInIST(),
+            sent: [],
+            failures: [
+              { name: 'Ramesh Kumar (demo)', phone: '9100000001', type: 'followup_t0', reason: 'Invalid phone number (#131026)', reachedByEmail: false },
+              { name: 'Lakshmi Devi (demo)', phone: '9100000002', type: 'followup_t2', reason: 'no phone on file', reachedByEmail: false },
+            ],
+          }
+        : demo
+        ? {
+            todayRun: { followups: 3, appointments: 0, whatsapp_ok: 2, whatsapp_fail: 1, email_ok: 2, email_fail: 0 },
+            runDate: todayInIST(),
+            sent: [
+              { name: 'Ramesh Kumar (demo)', kind: 'follow-up', email: true },
+              { name: 'Lakshmi Devi (demo)', kind: 'follow-up', email: false },
+            ],
+            failures: [{ name: 'Sample Patient (demo)', phone: '9100000000', type: 'followup_t0', reason: 'Invalid phone number (#131026)', reachedByEmail: true }],
+          }
+        : {};
+      const info = await sendReminderDigestEmail({ to, stats7, stats30, ...opts });
+      const out = { ok: true, demo, digestSentTo: to, messageId: info?.messageId };
+      // ?digest=test&wa=1 also fires the doctor's WhatsApp summary (real send to
+      // his number) so the template can be verified once Meta approves it.
+      if (req.query?.wa === '1') {
+        const waRes = await sendDoctorWa({ remindedNames: ['Ramesh Kumar', 'Lakshmi Devi', 'Mythili'], notReachedNames: ['Sai Kumar'], stats30, dateLong: formatDateLong(todayInIST()) });
+        out.whatsapp = waRes.success ? { ok: true, wamid: waRes.wamid, to: doctorWaTo(), template: waRes.template } : { ok: false, error: waRes.error, template: waRes.template };
+      }
+      return res.status(200).json(out);
+    } catch (e) {
+      return res.status(500).json({ error: e.message });
+    }
   }
 
   if (!META_TOKEN) {
@@ -83,6 +154,16 @@ export default async function handler(req, res) {
   const sendFuEmail = dryRun ? async () => ({ messageId: '(dry-run)' }) : sendFollowUpReminderEmail;
   const sendApptEmail = dryRun ? async () => ({ messageId: '(dry-run)' }) : sendAppointmentReminderEmail;
 
+  // Persist each send to reminder_logs so we can later prove delivery (via the
+  // Meta status webhook) and measure booking conversion. Best-effort and
+  // no-op in dry-run — a logging failure must never break a reminder.
+  const logSend = dryRun
+    ? async () => {}
+    : async (rowData) => {
+        try { await insertReminderLog(rowData); }
+        catch (e) { console.error('[reminderlog] insert failed:', e?.message); }
+      };
+
   const today = todayInIST();
   const t2 = addDaysISO(today, 2);
   const tomorrow = addDaysISO(today, 1);
@@ -96,6 +177,14 @@ export default async function handler(req, res) {
     appointments: [],
     counts: { followups: 0, appointments: 0, whatsapp_ok: 0, whatsapp_fail: 0, email_ok: 0, email_fail: 0 },
   };
+
+  // Patients NOT reached on WhatsApp this run (name + the number that failed +
+  // reason). Drives the digest's "couldn't reach — fix the number" block. Kept
+  // OUT of the returned summary so phone numbers don't land in Vercel logs.
+  const failuresToday = [];
+  // Patients the reminder WAS delivered to (WhatsApp accepted) — name + which
+  // channels + visit kind. Drives the digest's "reminders sent to" name list.
+  const sentToday = [];
 
   // -------------------------------------------------------------------------
   // 1. Follow-up cohort(s)
@@ -152,6 +241,10 @@ export default async function handler(req, res) {
     // Per-row follow-up date (cohorts now span multiple dates).
     const dateISO = new Date(row.follow_up_date).toISOString().slice(0, 10);
     const dateLong = formatDateLong(dateISO);
+    // Which cohort produced this row — recorded on the reminder log.
+    const reminderType = fuBackfillDays
+      ? 'followup_backfill'
+      : dateISO === today ? 'followup_t0' : dateISO === t2 ? 'followup_t2' : 'followup';
     const result = {
       patient_id: row.patient_id,
       first_name: row.first_name,
@@ -165,7 +258,7 @@ export default async function handler(req, res) {
     // Each attempt sends the template's OWN language code + matching {{1}}
     // name param (see tplLang/nameParam at top).
     if (patient.phone) {
-      const phone = cleanPhone(patient.phone);
+      const phone = normalizeIndianWa(patient.phone);
       const lang = langOf(row);
       const chain = lang === 'en'
         ? ['followup_reminder_2d_en']
@@ -201,9 +294,27 @@ export default async function handler(req, res) {
         result.sends.whatsapp.parameters = usedParameters;
       }
       summary.counts[wa.success ? 'whatsapp_ok' : 'whatsapp_fail']++;
+      await logSend({
+        reminderType,
+        channel: 'whatsapp',
+        patientId: patient.id,
+        consultationId: row.consultation_id,
+        recipient: phone,
+        template: usedTemplate,
+        language: tplLang(usedTemplate),
+        dueDate: `${dateISO}T00:00:00Z`,
+        status: wa.success ? 'sent' : 'failed',
+        providerMessageId: wa.success ? wa.wamid : null,
+        errorMessage: wa.success ? null : JSON.stringify(wa.error),
+      });
     } else {
       result.sends.whatsapp = { ok: false, error: 'no phone on file' };
       summary.counts.whatsapp_fail++;
+      await logSend({
+        reminderType, channel: 'whatsapp', patientId: patient.id,
+        consultationId: row.consultation_id, dueDate: `${dateISO}T00:00:00Z`,
+        status: 'failed', errorMessage: 'no phone on file',
+      });
     }
 
     // Email (parallel channel — sent regardless of WhatsApp result)
@@ -212,12 +323,39 @@ export default async function handler(req, res) {
         const em = await sendFuEmail(patient, dateISO);
         result.sends.email = { ok: true, messageId: em.messageId };
         summary.counts.email_ok++;
+        await logSend({
+          reminderType, channel: 'email', patientId: patient.id,
+          consultationId: row.consultation_id, recipient: patient.email,
+          language: langOf(row), dueDate: `${dateISO}T00:00:00Z`,
+          status: 'sent', providerMessageId: em.messageId,
+        });
       } catch (e) {
         result.sends.email = { ok: false, error: e.message };
         summary.counts.email_fail++;
+        await logSend({
+          reminderType, channel: 'email', patientId: patient.id,
+          consultationId: row.consultation_id, recipient: patient.email,
+          dueDate: `${dateISO}T00:00:00Z`, status: 'failed', errorMessage: e.message,
+        });
       }
     } else {
       result.sends.email = { ok: false, error: 'no email on file' };
+    }
+
+    if (!result.sends.whatsapp.ok) {
+      failuresToday.push({
+        name: [row.first_name, row.last_name].filter(Boolean).join(' '),
+        phone: patient.phone || null,
+        type: reminderType,
+        reason: shortWaReason(result.sends.whatsapp.error),
+        reachedByEmail: !!result.sends.email?.ok,
+      });
+    } else {
+      sentToday.push({
+        name: [row.first_name, row.last_name].filter(Boolean).join(' '),
+        kind: 'follow-up',
+        email: !!result.sends.email?.ok,
+      });
     }
 
     summary.followups.push(result);
@@ -295,7 +433,7 @@ export default async function handler(req, res) {
         const carriesMeetButton = isOnline && tpl.startsWith('appointment_reminder_online');
         wa = await sendWA({
           token: META_TOKEN,
-          to: cleanPhone(patient.phone),
+          to: normalizeIndianWa(patient.phone),
           template: tpl,
           language: attemptLang,
           parameters: usedParameters,
@@ -315,9 +453,27 @@ export default async function handler(req, res) {
         if (isOnline) result.sends.whatsapp.buttonUrlParam = meetCode;
       }
       summary.counts[wa.success ? 'whatsapp_ok' : 'whatsapp_fail']++;
+      await logSend({
+        reminderType: 'appointment_24h',
+        channel: 'whatsapp',
+        patientId: patient.id,
+        appointmentId: row.appointment_id,
+        recipient: normalizeIndianWa(patient.phone),
+        template: usedTemplate,
+        language: tplLang(usedTemplate),
+        dueDate: `${tomorrow}T00:00:00Z`,
+        status: wa.success ? 'sent' : 'failed',
+        providerMessageId: wa.success ? wa.wamid : null,
+        errorMessage: wa.success ? null : JSON.stringify(wa.error),
+      });
     } else {
       result.sends.whatsapp = { ok: false, error: 'no phone on file' };
       summary.counts.whatsapp_fail++;
+      await logSend({
+        reminderType: 'appointment_24h', channel: 'whatsapp', patientId: patient.id,
+        appointmentId: row.appointment_id, dueDate: `${tomorrow}T00:00:00Z`,
+        status: 'failed', errorMessage: 'no phone on file',
+      });
     }
 
     // Email
@@ -329,15 +485,89 @@ export default async function handler(req, res) {
         });
         result.sends.email = { ok: true, messageId: em.messageId };
         summary.counts.email_ok++;
+        await logSend({
+          reminderType: 'appointment_24h', channel: 'email', patientId: patient.id,
+          appointmentId: row.appointment_id, recipient: patient.email,
+          language: langOf(row), dueDate: `${tomorrow}T00:00:00Z`,
+          status: 'sent', providerMessageId: em.messageId,
+        });
       } catch (e) {
         result.sends.email = { ok: false, error: e.message };
         summary.counts.email_fail++;
+        await logSend({
+          reminderType: 'appointment_24h', channel: 'email', patientId: patient.id,
+          appointmentId: row.appointment_id, recipient: patient.email,
+          dueDate: `${tomorrow}T00:00:00Z`, status: 'failed', errorMessage: e.message,
+        });
       }
     } else {
       result.sends.email = { ok: false, error: 'no email on file' };
     }
 
+    if (!result.sends.whatsapp.ok) {
+      failuresToday.push({
+        name: [row.first_name, row.last_name].filter(Boolean).join(' '),
+        phone: patient.phone || null,
+        type: 'appointment_24h',
+        reason: shortWaReason(result.sends.whatsapp.error),
+        reachedByEmail: !!result.sends.email?.ok,
+      });
+    } else {
+      sentToday.push({
+        name: [row.first_name, row.last_name].filter(Boolean).join(' '),
+        kind: 'appointment',
+        email: !!result.sends.email?.ok,
+      });
+    }
+
     summary.appointments.push(result);
+  }
+
+  // -------------------------------------------------------------------------
+  // 3. Email digest — piggybacks on this daily cron (Hobby caps us at 2 crons
+  //    + 12 functions, so no separate schedule/endpoint is possible). The
+  //    scheduled run also emails the doctor a "this morning" heartbeat +
+  //    rolling delivery/conversion summary. DAILY by default (doctor's
+  //    preference); set REMINDER_DIGEST_DOW to a weekday (0=Sun..6=Sat) to
+  //    switch back to once-weekly. Skipped during dryRun and backfill runs.
+  // -------------------------------------------------------------------------
+  {
+    const dowEnv = parseInt(process.env.REMINDER_DIGEST_DOW, 10);
+    const restrictDow = Number.isInteger(dowEnv) && dowEnv >= 0 && dowEnv <= 6;
+    const todayDow = new Date(`${today}T00:00:00Z`).getUTCDay();
+    const isDigestDay = !restrictDow || todayDow === dowEnv;
+    if (!fuBackfillDays && isDigestDay) {
+      if (dryRun) {
+        summary.digest = { wouldSend: true, cadence: restrictDow ? 'weekly' : 'daily' };
+      } else {
+        try {
+          const [stats7, stats30] = await Promise.all([reminderStats(7), reminderStats(30)]);
+          const to = process.env.REMINDER_DIGEST_TO || 'drsujeeth@drsujeeth.com';
+          const info = await sendReminderDigestEmail({ to, stats7, stats30, todayRun: summary.counts, runDate: today, failures: failuresToday, sent: sentToday });
+          summary.digest = { sent: true, to, messageId: info?.messageId };
+          // Heartbeat to the doctor's WhatsApp (reliable notification channel).
+          // reached = got at least one channel; notReached = reached on nothing.
+          try {
+            // reached = got at least one channel; notReached = reached on nothing.
+            const remindedNames = [
+              ...sentToday.map((s) => s.name),
+              ...failuresToday.filter((f) => f.reachedByEmail).map((f) => f.name),
+            ];
+            const notReachedNames = failuresToday.filter((f) => !f.reachedByEmail).map((f) => f.name);
+            const waRes = await sendDoctorWa({ remindedNames, notReachedNames, stats30, dateLong: formatDateLong(today) });
+            summary.digest.whatsapp = waRes.success ? { ok: true, wamid: waRes.wamid, template: waRes.template } : { ok: false, error: waRes.error, template: waRes.template };
+          } catch (e2) {
+            summary.digest.whatsapp = { ok: false, error: e2.message };
+            console.error('[digest] whatsapp failed:', e2?.message);
+          }
+        } catch (e) {
+          summary.digest = { sent: false, error: e.message };
+          console.error('[digest] failed:', e?.message);
+        }
+      }
+    } else {
+      summary.digest = { sent: false, reason: fuBackfillDays ? 'backfill run' : `restricted to dow=${dowEnv}, today=${todayDow}` };
+    }
   }
 
   return res.status(200).json(summary);
@@ -350,4 +580,74 @@ export default async function handler(req, res) {
 function parseMeetCode(meetLink) {
   const m = /^https:\/\/meet\.google\.com\/([A-Za-z0-9-]+)\/?$/.exec(String(meetLink || '').trim());
   return m ? m[1] : null;
+}
+
+// --- Doctor's daily WhatsApp heartbeat (template daily_reminder_summary_en) ---
+// Email digests reach the doctor as self-sends Gmail auto-marks read with no
+// notification, so the same summary also goes to his WhatsApp (the channel he
+// reliably gets notified on). Best-effort — never blocks the cron.
+function doctorWaTo() { return process.env.REMINDER_WA_TO || '919866134340'; }
+function convString(stats30) {
+  const conv = stats30?.conversion || { reminded_patients: 0, booked_after_reminder: 0 };
+  return conv.reminded_patients > 0
+    ? `${Math.round((conv.booked_after_reminder / conv.reminded_patients) * 100)}% (${conv.booked_after_reminder} of ${conv.reminded_patients})`
+    : 'no data yet';
+}
+// WhatsApp-param-safe comma list of names: collapse whitespace (Meta rejects
+// params with newlines/tabs/4+ spaces), cap ~320 chars → "+N more", "none" empty.
+function nameList(names) {
+  const clean = (names || []).map((n) => String(n || '').replace(/\s+/g, ' ').trim()).filter(Boolean);
+  if (!clean.length) return 'none';
+  const out = [];
+  let len = 0;
+  for (let i = 0; i < clean.length; i++) {
+    if (len + clean[i].length + 2 > 320) { out.push(`+${clean.length - i} more`); break; }
+    out.push(clean[i]);
+    len += clean[i].length + 2;
+  }
+  return out.join(', ');
+}
+// Send the doctor's heartbeat: v2 template (WITH patient names) first, falling
+// back to the v1 counts-only template while v2 is still in Meta review (so the
+// daily WhatsApp is never dark). Returns { success, wamid?, template, error? }.
+async function sendDoctorWa({ remindedNames, notReachedNames, stats30, dateLong }) {
+  const reached = (remindedNames || []).length;
+  const notReached = (notReachedNames || []).length;
+  const conv = convString(stats30);
+  // v3 = UTILITY, with patient NAMES (no conversion line — that business metric
+  // got the earlier v2 reclassified MARKETING). Falls back to v1 UTILITY counts
+  // while v3 is still in review, so the daily WhatsApp is never dark.
+  const attempts = [
+    { template: 'daily_reminder_report_v3_en', parameters: [
+      { type: 'text', text: dateLong }, { type: 'text', text: String(reached) }, { type: 'text', text: nameList(remindedNames) },
+      { type: 'text', text: String(notReached) }, { type: 'text', text: nameList(notReachedNames) } ] },
+    { template: 'daily_reminder_summary_en', parameters: [
+      { type: 'text', text: dateLong }, { type: 'text', text: String(reached) }, { type: 'text', text: String(notReached) }, { type: 'text', text: conv } ] },
+  ];
+  let res = { success: false };
+  for (const a of attempts) {
+    res = await sendMetaTemplate({ token: process.env.META_WHATSAPP_TOKEN, to: doctorWaTo(), template: a.template, language: 'en', parameters: a.parameters });
+    res.template = a.template;
+    if (res.success) break;
+  }
+  return res;
+}
+
+// Pull a short, human-readable reason out of a WhatsApp send error so the
+// digest can show "Invalid phone number (#131026)" instead of a raw blob.
+// Handles the cron's chain-failure shape { attempts: [{template, error}] } plus
+// Meta's nested { error: { message, code, error_data: { details } } }, and the
+// plain-string case ("no phone on file").
+function shortWaReason(err) {
+  if (!err) return 'send failed';
+  if (typeof err === 'string') return err;
+  let e = err;
+  if (Array.isArray(err.attempts) && err.attempts.length) {
+    e = err.attempts[err.attempts.length - 1]?.error;
+  }
+  const meta = e?.error || e?.data?.error || e;
+  const msg = meta?.error_data?.details || meta?.message || meta?.error_user_title;
+  const code = meta?.code;
+  if (msg) return code ? `${msg} (#${code})` : String(msg);
+  try { return JSON.stringify(e).slice(0, 140); } catch { return 'send failed'; }
 }

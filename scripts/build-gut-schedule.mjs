@@ -21,7 +21,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const CAPTIONS_PATH =
   process.argv[2] ||
-  'C:\\Users\\drsuj\\Claude\\Social Media\\Gut Health\\42-Day-Instagram-Captions.md';
+  'C:\\Users\\drsuj\\Claude\\05_Social-Media\\Social Media\\Gut Health\\42-Day-Instagram-Captions.md';
 const START_DATE = '2026-06-11'; // teaser day (slot 0); Day N = slot N. Shifted +2 from Jun 9 for the WhatsApp community link.
 const BASE_URL =
   process.env.IG_VIDEO_BASE_URL || 'https://drsujeeth.com/wp-content/gut-challenge';
